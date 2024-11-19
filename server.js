@@ -2,34 +2,21 @@ import express from 'express';
 import pkg from 'pg';
 const { Pool } = pkg;
 import fs from 'fs';
+import axios from 'axios';
+
 
 const app = express();
 const pool = new Pool({
-    user: 'testintegratoin',
-    host: 'rc1a-lelb808lx7mwmty0.mdb.yandexcloud.net',
-    database: 'testintegratoin',
-    password: 'zeghi2-cixvAb-dexkiw',
-    port: 6432,
+    user: 'your data',
+    host: 'your data',
+    database: 'your data',
+    password: 'your data',
+    port: 5432,
     ssl: {
           rejectUnauthorized: true,
-          ca: fs.readFileSync('./CA.pem'),
+          ca: fs.readFileSync('your file'),
         },
 });
-
-
-// Функция для проверки соединения
-// const checkConnection = async () => {
-//     try {
-//         const res = await pool.query('SELECT NOW()');
-//         console.log('Соединение с базой данных успешно установлено:', res.rows[0]);
-//     } catch (err) {
-//         console.error('Ошибка при подключении к базе данных:', err);
-//     } finally {
-//         await pool.end();
-//     }
-// };
-
-// checkConnection();
 
 
 app.use(express.json());
@@ -57,6 +44,13 @@ app.post('/stocks', async (req, res) => {
     try {
         client = await pool.connect();
         const result = await client.query('INSERT INTO stocks (product_id, shop_id, quantity_on_shelf, quantity_in_order) VALUES (\$1, \$2, \$3, \$4) RETURNING *', [product_id, shop_id, quantity_on_shelf, quantity_in_order]);
+
+        await axios.post('http://localhost:4000/history', {
+            product_id,
+            shop_id,
+            action: 'Добавлен остаток'
+        });
+
         res.status(201).json(result.rows[0]);
     } catch (error) {
         console.error('Error creating stock:', error);
@@ -74,6 +68,11 @@ app.patch('/stocks/:id/increase', async (req, res) => {
     try {
         client = await pool.connect();
         const result = await client.query('UPDATE stocks SET quantity_on_shelf = quantity_on_shelf + \$1 WHERE id = \$2 RETURNING *', [quantity, id]);
+        await axios.post('http://localhost:4000/history', {
+            product_id: result.rows[0].product_id,
+            shop_id: result.rows[0].shop_id,
+            action: 'Увеличение остатка'
+        });
         res.json(result.rows[0]);
     } catch (error) {
         console.error('Error increasing stock:', error);
@@ -91,6 +90,11 @@ app.patch('/stocks/:id/decrease', async (req, res) => {
     try {
         client = await pool.connect();
         const result = await client.query('UPDATE stocks SET quantity_on_shelf = quantity_on_shelf - \$1 WHERE id = \$2 RETURNING *', [quantity, id]);
+        await axios.post('http://localhost:4000/history', {
+            product_id: result.rows[0].product_id,
+            shop_id: result.rows[0].shop_id,
+            action: 'Уменьшение остатка'
+        });
         res.json(result.rows[0]);
     } catch (error) {
         console.error('Error decreasing stock:', error);
@@ -106,21 +110,46 @@ app.get('/stocks', async (req, res) => {
     let client;
     try {
         client = await pool.connect();
-        const query = `
+
+        let query = `
             SELECT s.*, p.name, sh.name as shop_name 
             FROM stocks s
             JOIN products p ON s.product_id = p.id
             JOIN shops sh ON s.shop_id = sh.id
-            WHERE (\$1::text IS NULL OR p.plu = \$1)
-              AND (\$2::int IS NULL OR s.shop_id = \$2)
-              AND (\$3::int IS NULL OR s.quantity_on_shelf >= \$3)
-              AND (\$4::int IS NULL OR s.quantity_on_shelf <= \$4)
-              AND (\$5::int IS NULL OR s.quantity_in_order >= \$5)
-              AND (\$6::int IS NULL OR s.quantity_in_order <= \$6)
+            WHERE 1=1
         `;
-        const params = [plu || null, shop_id || null, quantity_on_shelf_from || null, quantity_on_shelf_to || null, quantity_in_order_from || null, quantity_in_order_to || null];
+
+        const params = [];
+        let paramIndex = 1;
+
+        if (plu) {
+            query += ` AND p.plu = $${paramIndex++}`;
+            params.push(plu);
+        }
+        if (shop_id) {
+            query += ` AND s.shop_id = $${paramIndex++}`;
+            params.push(shop_id);
+        }
+        if (quantity_on_shelf_from) {
+            query += ` AND s.quantity_on_shelf >= $${paramIndex++}`;
+            params.push(quantity_on_shelf_from);
+        }
+        if (quantity_on_shelf_to) {
+            query += ` AND s.quantity_on_shelf <= $${paramIndex++}`;
+            params.push(quantity_on_shelf_to);
+        }
+        if (quantity_in_order_from) {
+            query += ` AND s.quantity_in_order >= $${paramIndex++}`;
+            params.push(quantity_in_order_from);
+        }
+        if (quantity_in_order_to) {
+            query += ` AND s.quantity_in_order <= $${paramIndex++}`;
+            params.push(quantity_in_order_to);
+        }
+
         const result = await client.query(query, params);
         res.json(result.rows);
+
     } catch (error) {
         console.error('Error fetching stocks:', error);
         res.status(500).json({ error: 'Internal Server Error' });
@@ -133,15 +162,27 @@ app.get('/stocks', async (req, res) => {
 app.get('/products', async (req, res) => {
     const { name, plu } = req.query;
     let client;
+
     try {
         client = await pool.connect();
-        const query = `
-            SELECT * FROM products
-            WHERE (\$1::text IS NULL OR name ILIKE '%' || \$1 || '%')
-              AND (\$2::text IS NULL OR plu = \$2)
-        `;
-        const params = [name || null, plu || null];
-        const result = await client.query(query, params);
+        
+        const queryParts = [
+            `SELECT * FROM products`
+        ];
+        const params = [];
+
+        if (name) {
+            queryParts.push(`name ILIKE $${params.length + 1}`);
+            params.push(`%${name}%`);
+        }
+        if (plu) {
+            queryParts.push(`plu = $${params.length + 1}`);
+            params.push(plu);
+        }
+
+        const finalQuery = queryParts.length > 1 ? `${queryParts[0]} WHERE ${queryParts.slice(1).join(' AND ')}` : queryParts[0];
+
+        const result = await client.query(finalQuery, params);
         res.json(result.rows);
     } catch (error) {
         console.error('Error fetching products:', error);
@@ -150,6 +191,7 @@ app.get('/products', async (req, res) => {
         if (client) client.release();
     }
 });
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
